@@ -232,6 +232,7 @@ class RobertaSelfAttention(nn.Module):
             )
 
         self.is_decoder = config.is_decoder
+        self.is_causal = False
 
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         new_x_shape = x.size()[:-1] + (
@@ -642,7 +643,6 @@ class RobertaAttention(nn.Module):
         self.output = RobertaSelfOutput(config)
         self.pruned_heads = set()
         self.dim = config.hidden_size
-        self.is_causal = False
 
     def prune_heads(self, heads):
         if len(heads) == 0:
