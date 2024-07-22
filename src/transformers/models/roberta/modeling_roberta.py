@@ -1202,9 +1202,7 @@ class RobertaModel(RobertaPreTrainedModel):
             )
         else:
             if attention_mask is None:
-                attention_mask = torch.ones(
-                    input_shape, device=device
-                )  # (bs, seq_length)
+                attention_mask = torch.ones(((batch_size, seq_length + past_key_values_length)), device=device)
 
         if token_type_ids is None:
             if hasattr(self.embeddings, "token_type_ids"):
