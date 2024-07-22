@@ -110,6 +110,35 @@ A list of official Hugging Face and community (indicated by 🌎) resources to h
 - [`TFRobertaForMultipleChoice`] is supported by this [example script](https://github.com/huggingface/transformers/tree/main/examples/tensorflow/multiple-choice) and [notebook](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/multiple_choice-tf.ipynb).
 - [Multiple choice task guide](../tasks/multiple_choice)
 
+## Combining RoBERTa and Flash Attention 2
+
+First, make sure to install the latest version of Flash Attention 2 to include the sliding window attention feature.
+
+```bash
+pip install -U flash-attn --no-build-isolation
+```
+
+Make also sure that you have a hardware that is compatible with Flash-Attention 2. Read more about it in the official documentation of flash-attn repository. Make also sure to load your model in half-precision (e.g. `torch.float16`)
+
+To load and run a model using Flash Attention 2, refer to the snippet below:
+
+```python
+>>> import torch
+>>> from transformers import AutoTokenizer, AutoModel
+
+>>> device = "cuda" # the device to load the model onto
+
+>>> tokenizer = AutoTokenizer.from_pretrained("FacebookAI/roberta-base")
+>>> model = AutoModel.from_pretrained("FacebookAI/roberta-base", torch_dtype=torch.float16, use_flash_attention_2=True)
+
+>>> text = "Replace me by any text you'd like."
+
+>>> encoded_input = tokenizer(text, return_tensors='pt').to(device)
+>>> model.to(device)
+
+>>> output = model(**encoded_input)
+```
+
 ## RobertaConfig
 
 [[autodoc]] RobertaConfig
