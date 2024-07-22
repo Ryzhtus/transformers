@@ -70,7 +70,7 @@ def _get_unpad_data(attention_mask):
     indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
     max_seqlen_in_batch = seqlens_in_batch.max().item()
     cu_seqlens = F.pad(
-        torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.torch.int32), (1, 0)
+        torch.cumsum(seqlens_in_batch.flatten(), dim=0, dtype=torch.torch.int32), (1, 0)
     )
     return (
         indices,
@@ -1202,7 +1202,9 @@ class RobertaModel(RobertaPreTrainedModel):
             )
         else:
             if attention_mask is None:
-                attention_mask = torch.ones(((batch_size, seq_length + past_key_values_length)), device=device)
+                attention_mask = torch.ones(
+                    ((batch_size, seq_length + past_key_values_length)), device=device
+                )
 
         if token_type_ids is None:
             if hasattr(self.embeddings, "token_type_ids"):
