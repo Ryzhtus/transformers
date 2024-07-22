@@ -232,7 +232,6 @@ class RobertaSelfAttention(nn.Module):
             )
 
         self.is_decoder = config.is_decoder
-        self.is_causal = False
 
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         new_x_shape = x.size()[:-1] + (
@@ -367,9 +366,103 @@ class RobertaSelfAttention(nn.Module):
         return outputs
 
 
-class RobertaFlashAttention2(RobertaSelfAttention):
+# Copied from transformers.models.bert.modeling_bert.BertSelfOutput
+class RobertaSelfOutput(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
+
+
+# Copied from transformers.models.bert.modeling_bert.BertSelfOutput
+class RobertaSelfOutput(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
+
+
+# Copied from transformers.models.bert.modeling_bert.BertAttention with Bert->Roberta,BERT->ROBERTA
+class RobertaAttention(nn.Module):
+    def __init__(self, config, position_embedding_type=None):
+        super().__init__()
+        self.config = config
+        self.self = RobertaSelfAttention(config)
+        self.output = RobertaSelfOutput(config)
+        self.pruned_heads = set()
+        self.dim = config.hidden_size
+        self.is_causal = False
+
+    def prune_heads(self, heads):
+        if len(heads) == 0:
+            return
+        heads, index = find_pruneable_heads_and_indices(
+            heads,
+            self.self.num_attention_heads,
+            self.self.attention_head_size,
+            self.pruned_heads,
+        )
+
+        # Prune linear layers
+        self.self.query = prune_linear_layer(self.self.query, index)
+        self.self.key = prune_linear_layer(self.self.key, index)
+        self.self.value = prune_linear_layer(self.self.value, index)
+        self.output.dense = prune_linear_layer(self.output.dense, index, dim=1)
+
+        # Update hyper params and store pruned heads
+        self.self.num_attention_heads = self.self.num_attention_heads - len(heads)
+        self.self.all_head_size = (
+            self.self.attention_head_size * self.self.num_attention_heads
+        )
+        self.pruned_heads = self.pruned_heads.union(heads)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
+        output_attentions: Optional[bool] = False,
+    ) -> Tuple[torch.Tensor]:
+        self_outputs = self.self(
+            hidden_states,
+            attention_mask,
+            head_mask,
+            encoder_hidden_states,
+            encoder_attention_mask,
+            past_key_value,
+            output_attentions,
+        )
+        attention_output = self.output(self_outputs[0], hidden_states)
+        outputs = (attention_output,) + self_outputs[
+            1:
+        ]  # add attentions if we output them
+        return outputs
+
+
+class RobertaFlashAttention2(RobertaAttention):
     """
-    Roberta flash attention module. This module inherits from `RobertaAttention` as the weights of the module
+    Roberta flash attention module. This module inherits from `XLMRobertaAttention` as the weights of the module
     stays untouched. The only required change would be on the forward pass where it needs to correctly call the public
     API of flash attention and deal with padding tokens in case the input contains any of them.
     """
@@ -393,12 +486,14 @@ class RobertaFlashAttention2(RobertaSelfAttention):
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
     ) -> Tuple[torch.Tensor]:
-        mixed_query_layer = self.query(hidden_states)
+        mixed_query_layer = self.self.query(hidden_states)
         bsz, q_len, _ = hidden_states.size()
 
         def reshape(x: torch.Tensor) -> torch.Tensor:
             """separate heads"""
-            return x.view(bsz, -1, self.num_attention_heads, self.attention_head_size)
+            return x.view(
+                bsz, -1, self.self.num_attention_heads, self.self.attention_head_size
+            )
 
         # If this is instantiated as a cross-attention module, the keys
         # and values come from an encoder; the attention mask needs to be
@@ -411,23 +506,27 @@ class RobertaFlashAttention2(RobertaSelfAttention):
             value_layer = past_key_value[1]
             attention_mask = encoder_attention_mask
         elif is_cross_attention:
-            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
-            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
+            key_layer = self.self.transpose_for_scores(
+                self.self.key(encoder_hidden_states)
+            )
+            value_layer = self.self.transpose_for_scores(
+                self.self.value(encoder_hidden_states)
+            )
             attention_mask = encoder_attention_mask
         elif past_key_value is not None:
-            key_layer = self.transpose_for_scores(self.key(hidden_states))
-            value_layer = self.transpose_for_scores(self.value(hidden_states))
+            key_layer = self.self.transpose_for_scores(self.self.key(hidden_states))
+            value_layer = self.self.transpose_for_scores(self.self.value(hidden_states))
             key_layer = torch.cat([past_key_value[0], key_layer], dim=2)
             value_layer = torch.cat([past_key_value[1], value_layer], dim=2)
         else:
-            key_layer = self.transpose_for_scores(self.key(hidden_states))
-            value_layer = self.transpose_for_scores(self.value(hidden_states))
+            key_layer = self.self.transpose_for_scores(self.self.key(hidden_states))
+            value_layer = self.self.transpose_for_scores(self.self.value(hidden_states))
 
-        query_layer = self.transpose_for_scores(mixed_query_layer)
+        query_layer = self.self.transpose_for_scores(mixed_query_layer)
 
-        attn_dropout = self.dropout.p if self.training else 0.0
+        attn_dropout = self.self.dropout.p if self.training else 0.0
 
-        if self.is_decoder:
+        if self.self.is_decoder:
             # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
             # Further calls to cross_attention layer can then reuse all cross-attention
             # key/value_states (first "if" case)
@@ -447,10 +546,10 @@ class RobertaFlashAttention2(RobertaSelfAttention):
             if torch.is_autocast_enabled():
                 target_dtype = torch.get_autocast_gpu_dtype()
             # Handle the case where the model is quantized
-            elif hasattr(self.config, "_pre_quantization_dtype"):
-                target_dtype = self.config._pre_quantization_dtype
+            elif hasattr(self.self.config, "_pre_quantization_dtype"):
+                target_dtype = self.self.config._pre_quantization_dtype
             else:
-                target_dtype = self.query.weight.dtype
+                target_dtype = self.self.query.weight.dtype
 
             logger.warning_once(
                 f"The input hidden states seems to be silently casted in float32, this might be related to"
@@ -471,12 +570,14 @@ class RobertaFlashAttention2(RobertaSelfAttention):
             dropout=attn_dropout,
         )
 
-        attn_weights_reshaped = attn_weights.reshape(bsz, q_len, self.all_head_size)
+        attn_weights_reshaped = attn_weights.reshape(
+            bsz, q_len, self.self.all_head_size
+        )
         attn_output = self.output.dense(attn_weights_reshaped)
 
         outputs = (attn_output, attn_weights) if output_attentions else (attn_output,)
 
-        if self.is_decoder:
+        if self.self.is_decoder:
             outputs = outputs + (past_key_value,)
         return outputs
 
@@ -578,7 +679,7 @@ class RobertaFlashAttention2(RobertaSelfAttention):
         if query_length == kv_seq_len:
             query_layer = index_first_axis(
                 query_layer.reshape(
-                    batch_size * kv_seq_len, self.num_attention_heads, head_dim
+                    batch_size * kv_seq_len, self.self.num_attention_heads, head_dim
                 ),
                 indices_k,
             )
@@ -610,87 +711,9 @@ class RobertaFlashAttention2(RobertaSelfAttention):
 
 
 ROBERTA_ATTENTION_CLASSES = {
-    "eager": RobertaSelfAttention,
+    "eager": RobertaAttention,
     "flash_attention_2": RobertaFlashAttention2,
 }
-
-
-# Copied from transformers.models.bert.modeling_bert.BertSelfOutput
-class RobertaSelfOutput(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-    def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
-    ) -> torch.Tensor:
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
-        return hidden_states
-
-
-# Copied from transformers.models.bert.modeling_bert.BertAttention with Bert->Roberta,BERT->ROBERTA
-class RobertaAttention(nn.Module):
-    def __init__(self, config, position_embedding_type=None):
-        super().__init__()
-        self.config = config
-        self.self = ROBERTA_ATTENTION_CLASSES[config._attn_implementation](
-            config, position_embedding_type=position_embedding_type
-        )
-        self.output = RobertaSelfOutput(config)
-        self.pruned_heads = set()
-        self.dim = config.hidden_size
-
-    def prune_heads(self, heads):
-        if len(heads) == 0:
-            return
-        heads, index = find_pruneable_heads_and_indices(
-            heads,
-            self.self.num_attention_heads,
-            self.self.attention_head_size,
-            self.pruned_heads,
-        )
-
-        # Prune linear layers
-        self.self.query = prune_linear_layer(self.self.query, index)
-        self.self.key = prune_linear_layer(self.self.key, index)
-        self.self.value = prune_linear_layer(self.self.value, index)
-        self.output.dense = prune_linear_layer(self.output.dense, index, dim=1)
-
-        # Update hyper params and store pruned heads
-        self.self.num_attention_heads = self.self.num_attention_heads - len(heads)
-        self.self.all_head_size = (
-            self.self.attention_head_size * self.self.num_attention_heads
-        )
-        self.pruned_heads = self.pruned_heads.union(heads)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
-        past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
-        output_attentions: Optional[bool] = False,
-    ) -> Tuple[torch.Tensor]:
-        self_outputs = self.self(
-            hidden_states,
-            attention_mask,
-            head_mask,
-            encoder_hidden_states,
-            encoder_attention_mask,
-            past_key_value,
-            output_attentions,
-        )
-        attention_output = self.output(self_outputs[0], hidden_states)
-        outputs = (attention_output,) + self_outputs[
-            1:
-        ]  # add attentions if we output them
-        return outputs
 
 
 # Copied from transformers.models.bert.modeling_bert.BertIntermediate
@@ -732,7 +755,7 @@ class RobertaLayer(nn.Module):
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
-        self.attention = RobertaAttention(config)
+        self.attention = ROBERTA_ATTENTION_CLASSES[config._attn_implementation](config)
         self.is_decoder = config.is_decoder
         self.add_cross_attention = config.add_cross_attention
         if self.add_cross_attention:
@@ -740,9 +763,9 @@ class RobertaLayer(nn.Module):
                 raise ValueError(
                     f"{self} should be used as a decoder model if cross attention is added"
                 )
-            self.crossattention = RobertaAttention(
-                config, position_embedding_type="absolute"
-            )
+            self.crossattention = ROBERTA_ATTENTION_CLASSES[
+                config._attn_implementation
+            ](config, position_embedding_type="absolute")
         self.intermediate = RobertaIntermediate(config)
         self.output = RobertaOutput(config)
 
