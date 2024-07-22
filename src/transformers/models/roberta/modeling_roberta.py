@@ -393,7 +393,7 @@ class RobertaAttention(nn.Module):
         )
         self.output = RobertaSelfOutput(config)
         self.pruned_heads = set()
-        self.dim = config.dim
+        self.dim = config.hidden_size
         self.is_causal = False
 
     def prune_heads(self, heads):
