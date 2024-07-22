@@ -392,14 +392,12 @@ class RobertaFlashAttention2(RobertaSelfAttention):
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
     ) -> Tuple[torch.Tensor]:
-        mixed_query_layer = self.self.query(hidden_states)
+        mixed_query_layer = self.query(hidden_states)
         bsz, q_len, _ = hidden_states.size()
 
         def reshape(x: torch.Tensor) -> torch.Tensor:
             """separate heads"""
-            return x.view(
-                bsz, -1, self.self.num_attention_heads, self.self.attention_head_size
-            )
+            return x.view(bsz, -1, self.num_attention_heads, self.attention_head_size)
 
         # If this is instantiated as a cross-attention module, the keys
         # and values come from an encoder; the attention mask needs to be
@@ -412,27 +410,23 @@ class RobertaFlashAttention2(RobertaSelfAttention):
             value_layer = past_key_value[1]
             attention_mask = encoder_attention_mask
         elif is_cross_attention:
-            key_layer = self.self.transpose_for_scores(
-                self.self.key(encoder_hidden_states)
-            )
-            value_layer = self.self.transpose_for_scores(
-                self.self.value(encoder_hidden_states)
-            )
+            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
+            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
             attention_mask = encoder_attention_mask
         elif past_key_value is not None:
-            key_layer = self.self.transpose_for_scores(self.self.key(hidden_states))
-            value_layer = self.self.transpose_for_scores(self.self.value(hidden_states))
+            key_layer = self.transpose_for_scores(self.key(hidden_states))
+            value_layer = self.transpose_for_scores(self.value(hidden_states))
             key_layer = torch.cat([past_key_value[0], key_layer], dim=2)
             value_layer = torch.cat([past_key_value[1], value_layer], dim=2)
         else:
-            key_layer = self.self.transpose_for_scores(self.self.key(hidden_states))
-            value_layer = self.self.transpose_for_scores(self.self.value(hidden_states))
+            key_layer = self.transpose_for_scores(self.key(hidden_states))
+            value_layer = self.transpose_for_scores(self.value(hidden_states))
 
-        query_layer = self.self.transpose_for_scores(mixed_query_layer)
+        query_layer = self.transpose_for_scores(mixed_query_layer)
 
-        attn_dropout = self.self.dropout.p if self.training else 0.0
+        attn_dropout = self.dropout.p if self.training else 0.0
 
-        if self.self.is_decoder:
+        if self.is_decoder:
             # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
             # Further calls to cross_attention layer can then reuse all cross-attention
             # key/value_states (first "if" case)
@@ -452,10 +446,10 @@ class RobertaFlashAttention2(RobertaSelfAttention):
             if torch.is_autocast_enabled():
                 target_dtype = torch.get_autocast_gpu_dtype()
             # Handle the case where the model is quantized
-            elif hasattr(self.self.config, "_pre_quantization_dtype"):
-                target_dtype = self.self.config._pre_quantization_dtype
+            elif hasattr(self.config, "_pre_quantization_dtype"):
+                target_dtype = self.config._pre_quantization_dtype
             else:
-                target_dtype = self.self.query.weight.dtype
+                target_dtype = self.query.weight.dtype
 
             logger.warning_once(
                 f"The input hidden states seems to be silently casted in float32, this might be related to"
@@ -476,14 +470,12 @@ class RobertaFlashAttention2(RobertaSelfAttention):
             dropout=attn_dropout,
         )
 
-        attn_weights_reshaped = attn_weights.reshape(
-            bsz, q_len, self.self.all_head_size
-        )
+        attn_weights_reshaped = attn_weights.reshape(bsz, q_len, self.all_head_size)
         attn_output = self.output.dense(attn_weights_reshaped)
 
         outputs = (attn_output, attn_weights) if output_attentions else (attn_output,)
 
-        if self.self.is_decoder:
+        if self.is_decoder:
             outputs = outputs + (past_key_value,)
         return outputs
 
