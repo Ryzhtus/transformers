@@ -1194,14 +1194,15 @@ class RobertaModel(RobertaPreTrainedModel):
             past_key_values[0][0].shape[2] if past_key_values is not None else 0
         )
 
-        if getattr(self.config, "_flash_attn_2_enabled", False):
-            attention_mask = (
-                attention_mask
-                if (attention_mask is not None and 0 in attention_mask)
-                else None
-            )
-        else:
-            if attention_mask is None:
+        if attention_mask is None:
+            if self._use_flash_attention_2:
+                # 2d mask is passed through the layers
+                attention_mask = (
+                    attention_mask
+                    if (attention_mask is not None and 0 in attention_mask)
+                    else None
+                )
+            else:
                 attention_mask = torch.ones(
                     ((batch_size, seq_length + past_key_values_length)), device=device
                 )
